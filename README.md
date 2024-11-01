@@ -54,6 +54,14 @@ pg_tde_add_key_provider_vault_v2(
                         vault_mount_path TEXT,
                         vault_ca_path TEXT);
 
+-- For KMIP key provider
+pg_tde_add_key_provider_kmip(
+                        provider_name VARCHAR(128),
+                        kmip_host TEXT,
+                        kmip_port TEXT,
+                        kmip_ca_path TEXT,
+                        kmip_cert_path TEXT);
+
 -- For File key provider
 FUNCTION pg_tde_add_key_provider_file(
                         provider_name VARCHAR(128), 

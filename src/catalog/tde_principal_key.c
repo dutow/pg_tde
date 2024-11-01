@@ -684,10 +684,10 @@ pg_tde_get_key_info(PG_FUNCTION_ARGS, Oid dbOid, Oid spcOid)
     GenericKeyring *keyring;
 
     /* Build a tuple descriptor for our result type */
-    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-        ereport(ERROR,
-                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                    errmsg("function returning record called in context that cannot accept type record")));
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+	    ereport(ERROR,
+	            (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+	                errmsg("function returning record called in context that cannot accept type record")));
 
 	LWLockAcquire(tde_lwlock_enc_keys(), LW_SHARED);
     principal_key = GetPrincipalKey(dbOid, spcOid, LW_SHARED);
@@ -788,6 +788,12 @@ get_principal_key_from_keyring(Oid dbOid, Oid spcOid)
     if (spcOid != GLOBALTABLESPACE_OID)
     {
         push_principal_key_to_cache(principalKey);
+
+        /* If we do store key in cache we want to return a cache reference 
+         * rather then a palloc'ed copy.
+         */
+        pfree(principalKey);
+        principalKey = get_principal_key_from_cache(dbOid);
     }
 #endif
 

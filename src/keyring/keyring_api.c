@@ -51,7 +51,7 @@ find_key_provider(ProviderType type)
 	SimplePtrListCell *lc;
 	for (lc = registeredKeyProviders.head; lc; lc = lc->next)
 	{
-		KeyProviders *kp = (KeyProviders *) lc->ptr;
+		KeyProviders *kp = (KeyProviders *)lc->ptr;
 		if (kp->type == type)
 		{
 			return kp;

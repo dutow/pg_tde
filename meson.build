@@ -40,6 +40,8 @@ pg_tde_sources = files(
         'src/keyring/keyring_curl.c',
         'src/keyring/keyring_file.c',
         'src/keyring/keyring_vault.c',
+        'src/keyring/keyring_kmip.c',
+        'src/keyring/keyring_kmip_ereport.c',
         'src/keyring/keyring_api.c',
 
         'src/smgr/pg_tde_smgr.c',
@@ -53,9 +55,14 @@ pg_tde_sources = files(
         'src/pg_tde_defs.c',
         'src/pg_tde.c',
         'src/pg_tde_event_capture.c',
+  
+        'src/libkmip/libkmip/src/kmip_bio.c',
+        'src/libkmip/libkmip/src/kmip.c',
+        'src/libkmip/libkmip/src/kmip_locate.c',
+        'src/libkmip/libkmip/src/kmip_memset.c',
 )
 
-incdir = include_directories(src_version / 'include', 'src/include', '.')
+incdir = include_directories(src_version / 'include', 'src/include', '.', 'src/libkmip/libkmip/include')
 
 deps_update = {'dependencies': contrib_mod_args.get('dependencies') + [curldep]}
 
@@ -96,6 +103,7 @@ sql_tests = [
       'trigger_on_view_basic',
       'change_access_method_basic',
       'insert_update_delete_basic',
+      'tablespace_basic',
       'vault_v2_test_basic',
       'alter_index_basic',
       'merge_join_basic',
@@ -123,9 +131,11 @@ if get_variable('percona_ext', false)
       'test_issue_153_fix',
       'multi_insert',
       'keyprovider_dependency',
+      'kmip_test',
       'trigger_on_view',
       'change_access_method',
       'insert_update_delete',
+      'tablespace',
       'vault_v2_test',
       'alter_index',
       'merge_join',
