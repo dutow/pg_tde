@@ -316,51 +316,51 @@ json_kring_object_field_start(void *state, char *fname, bool isnull)
 			}
 			switch (parse->provider_type)
 			{
-			case FILE_KEY_PROVIDER:
-				if (strcmp(fname, JK_FIELD_NAMES[JF_FILE_PATH]) == 0)
-					*field = JF_FILE_PATH;
-				else
-				{
-					*field = JK_FIELD_UNKNOWN;
-					elog(DEBUG1, "parse file keyring config: unexpected field %s", fname);
-				}
-				break;
+				case FILE_KEY_PROVIDER:
+					if (strcmp(fname, JK_FIELD_NAMES[JF_FILE_PATH]) == 0)
+						*field = JF_FILE_PATH;
+					else
+					{
+						*field = JK_FIELD_UNKNOWN;
+						elog(DEBUG1, "parse file keyring config: unexpected field %s", fname);
+					}
+					break;
 
-			case VAULT_V2_KEY_PROVIDER:
-				if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_TOKEN]) == 0)
-					*field = JK_VAULT_TOKEN;
-				else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_URL]) == 0)
-					*field = JK_VAULT_URL;
-				else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_MOUNT_PATH]) == 0)
-					*field = JK_VAULT_MOUNT_PATH;
-				else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_CA_PATH]) == 0)
-					*field = JK_VAULT_CA_PATH;
-				else
-				{
-					*field = JK_FIELD_UNKNOWN;
-					elog(DEBUG1, "parse json keyring config: unexpected field %s", fname);
-				}
-				break;
+				case VAULT_V2_KEY_PROVIDER:
+					if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_TOKEN]) == 0)
+						*field = JK_VAULT_TOKEN;
+					else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_URL]) == 0)
+						*field = JK_VAULT_URL;
+					else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_MOUNT_PATH]) == 0)
+						*field = JK_VAULT_MOUNT_PATH;
+					else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_CA_PATH]) == 0)
+						*field = JK_VAULT_CA_PATH;
+					else
+					{
+						*field = JK_FIELD_UNKNOWN;
+						elog(DEBUG1, "parse json keyring config: unexpected field %s", fname);
+					}
+					break;
 
-			case KMIP_KEY_PROVIDER:
-				if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_HOST]) == 0)
-					*field = JK_KMIP_HOST;
-				else if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_PORT]) == 0)
-					*field = JK_KMIP_PORT;
-				else if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_CA_PATH]) == 0)
-					*field = JK_KMIP_CA_PATH;
-				else if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_CERT_PATH]) == 0)
-					*field = JK_KMIP_CERT_PATH;
-				else
-				{
-					*field = JK_FIELD_UNKNOWN;
-					elog(DEBUG1, "parse json keyring config: unexpected field %s", fname);
-				}
-				break;
+				case KMIP_KEY_PROVIDER:
+					if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_HOST]) == 0)
+						*field = JK_KMIP_HOST;
+					else if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_PORT]) == 0)
+						*field = JK_KMIP_PORT;
+					else if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_CA_PATH]) == 0)
+						*field = JK_KMIP_CA_PATH;
+					else if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_CERT_PATH]) == 0)
+						*field = JK_KMIP_CERT_PATH;
+					else
+					{
+						*field = JK_FIELD_UNKNOWN;
+						elog(DEBUG1, "parse json keyring config: unexpected field %s", fname);
+					}
+					break;
 
-			case UNKNOWN_KEY_PROVIDER:
-				Assert(0);
-				break;
+				case UNKNOWN_KEY_PROVIDER:
+					Assert(0);
+					break;
 			}
 			break;
 
