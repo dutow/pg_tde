@@ -605,26 +605,26 @@ load_file_keyring_provider_options(char *keyring_options)
 static VaultV2Keyring *
 load_vaultV2_keyring_provider_options(char *keyring_options)
 {
-	VaultV2Keyring *vaultV2_keyring = palloc0(sizeof(VaultV2Keyring));
+	VaultV2Keyring	*vaultV2_keyring = palloc0(sizeof(VaultV2Keyring));
 
 	vaultV2_keyring->keyring.type = VAULT_V2_KEY_PROVIDER;
 
-	if (!ParseKeyringJSONOptions(VAULT_V2_KEY_PROVIDER, vaultV2_keyring,
-								 keyring_options, strlen(keyring_options)))
+	if (!ParseKeyringJSONOptions(VAULT_V2_KEY_PROVIDER, vaultV2_keyring, 
+									keyring_options, strlen(keyring_options)))
 	{
 		return NULL;
 	}
-
-	if (strlen(vaultV2_keyring->vault_token) == 0 ||
-		strlen(vaultV2_keyring->vault_url) == 0 ||
+	
+	if(strlen(vaultV2_keyring->vault_token) == 0 ||
+		strlen(vaultV2_keyring->vault_url) == 0 || 
 		strlen(vaultV2_keyring->vault_mount_path) == 0)
 	{
 		ereport(WARNING,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("missing in the keyring options:%s%s%s",
-						*(vaultV2_keyring->vault_token) ? "" : " token",
-						*(vaultV2_keyring->vault_url) ? "" : " url",
-						*(vaultV2_keyring->vault_mount_path) ? "" : " mountPath")));
+							*(vaultV2_keyring->vault_token) ? "" : " token",
+							*(vaultV2_keyring->vault_url) ? "" : " url",
+							*(vaultV2_keyring->vault_mount_path) ? "" : " mountPath")));
 		return NULL;
 	}
 
