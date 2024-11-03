@@ -2,7 +2,7 @@
  *
  * tde_keyring_parse_opts.c
  *      Parser routines for the keyring JSON options
- * 
+ *
  * Each value in the JSON document can be either scalar (string) - a value itself
  * or a reference to the external object that contains the value. Though the top
  * level field "type" can be only scalar.
@@ -47,7 +47,7 @@ typedef enum JsonKeringSemState
 {
 	JK_EXPECT_TOP_FIELD,
 	JK_EXPECT_EXTERN_VAL,
-}			JsonKeringSemState;
+} JsonKeringSemState;
 
 #define KEYRING_REMOTE_FIELD_TYPE "remote"
 #define KEYRING_FILE_FIELD_TYPE "file"
@@ -69,9 +69,14 @@ typedef enum JsonKeyringField
 	JK_VAULT_MOUNT_PATH,
 	JK_VAULT_CA_PATH,
 
+	JK_KMIP_HOST,
+	JK_KMIP_PORT,
+	JK_KMIP_CA_PATH,
+	JK_KMIP_CERT_PATH,
+
 	/* must be the last */
 	JK_FIELDS_TOTAL
-}			JsonKeyringField;
+} JsonKeyringField;
 
 static const char *JK_FIELD_NAMES[JK_FIELDS_TOTAL] = {
 	[JK_FIELD_UNKNOWN] = "unknownField",
@@ -89,6 +94,11 @@ static const char *JK_FIELD_NAMES[JK_FIELDS_TOTAL] = {
 	[JK_VAULT_URL] = "url",
 	[JK_VAULT_MOUNT_PATH] = "mountPath",
 	[JK_VAULT_CA_PATH] = "caPath",
+
+	[JK_KMIP_HOST] = "host",
+	[JK_KMIP_PORT] = "port",
+	[JK_KMIP_CA_PATH] = "caPath",
+	[JK_KMIP_CERT_PATH] = "certPath",
 };
 
 #define MAX_JSON_DEPTH 64
@@ -100,7 +110,7 @@ typedef struct JsonKeyringState
 	 * Caller's options to be set from JSON values. Expected either
 	 * `VaultV2Keyring` or `FileKeyring`
 	 */
-	void	   *provider_opts;
+	void *provider_opts;
 
 	/*
 	 * A field hierarchy of the current branch, field[level] is the current
@@ -109,37 +119,35 @@ typedef struct JsonKeyringState
 	 */
 	JsonKeyringField field[MAX_JSON_DEPTH];
 	JsonKeringSemState state;
-	int			level;
+	int level;
 
 	/*
 	 * The rest of the scalar fields might be in the JSON document but has no
 	 * direct value for the caller. Although we need them for the values
 	 * extraction or state tracking.
 	 */
-	char	   *kring_type;
-	char	   *field_type;
-	char	   *extern_url;
-	char	   *extern_path;
-}			JsonKeyringState;
+	char *kring_type;
+	char *field_type;
+	char *extern_url;
+	char *extern_path;
+} JsonKeyringState;
 
 static JsonParseErrorType json_kring_scalar(void *state, char *token, JsonTokenType tokentype);
 static JsonParseErrorType json_kring_object_field_start(void *state, char *fname, bool isnull);
 static JsonParseErrorType json_kring_object_start(void *state);
 static JsonParseErrorType json_kring_object_end(void *state);
 
-static void json_kring_assign_scalar(JsonKeyringState * parse, JsonKeyringField field, char *value);
+static void json_kring_assign_scalar(JsonKeyringState *parse, JsonKeyringField field, char *value);
 static char *get_remote_kring_value(const char *url, const char *field_name);
 static char *get_file_kring_value(const char *path, const char *field_name);
-
 
 /*
  * Parses json input for the given provider type and sets the provided options
  * out_opts should be a palloc'd `VaultV2Keyring` or `FileKeyring` struct as the
  * respective option values will be mem copied into it.
  * Returns `true` if parsing succeded and `false` otherwise.
-*/
-bool
-ParseKeyringJSONOptions(ProviderType provider_type, void *out_opts, char *in_buf, int buf_len)
+ */
+bool ParseKeyringJSONOptions(ProviderType provider_type, void *out_opts, char *in_buf, int buf_len)
 {
 	JsonLexContext *jlex;
 	JsonKeyringState parse = {0};
@@ -181,7 +189,6 @@ ParseKeyringJSONOptions(ProviderType provider_type, void *out_opts, char *in_buf
 		ereport(WARNING,
 				(errmsg("parsing of keyring options failed: %s",
 						json_errdetail(jerr, jlex))));
-
 	}
 #if PG_VERSION_NUM >= 170000
 	freeJsonLexContext(jlex);
@@ -192,7 +199,7 @@ ParseKeyringJSONOptions(ProviderType provider_type, void *out_opts, char *in_buf
 
 /*
  * JSON parser semantic actions
-*/
+ */
 
 /*
  * Invoked at the start of each object in the JSON document.
@@ -217,12 +224,12 @@ json_kring_object_start(void *state)
 
 	switch (parse->level)
 	{
-		case 0:
-			parse->state = JK_EXPECT_TOP_FIELD;
-			break;
-		case 1:
-			parse->state = JK_EXPECT_EXTERN_VAL;
-			break;
+	case 0:
+		parse->state = JK_EXPECT_TOP_FIELD;
+		break;
+	case 1:
+		parse->state = JK_EXPECT_EXTERN_VAL;
+		break;
 	}
 
 	return JSON_SUCCESS;
@@ -255,7 +262,7 @@ json_kring_object_end(void *state)
 		{
 			JsonKeyringField parent_field = parse->field[0];
 
-			char	   *value = NULL;
+			char *value = NULL;
 
 			if (strcmp(parse->field_type, KEYRING_REMOTE_FIELD_TYPE) == 0)
 				value = get_remote_kring_value(parse->extern_url, JK_FIELD_NAMES[parent_field]);
@@ -292,56 +299,76 @@ json_kring_object_field_start(void *state, char *fname, bool isnull)
 
 	switch (parse->state)
 	{
-		case JK_EXPECT_TOP_FIELD:
+	case JK_EXPECT_TOP_FIELD:
 
-			/*
-			 * On the top level, "type" stores a keyring type and this field
-			 * is common for all keyrings. The rest of the fields depend on
-			 * the keyring type.
-			 */
-			if (strcmp(fname, JK_FIELD_NAMES[JK_KRING_TYPE]) == 0)
+		/*
+		 * On the top level, "type" stores a keyring type and this field
+		 * is common for all keyrings. The rest of the fields depend on
+		 * the keyring type.
+		 */
+		if (strcmp(fname, JK_FIELD_NAMES[JK_KRING_TYPE]) == 0)
+		{
+			*field = JK_KRING_TYPE;
+			break;
+		}
+		switch (parse->provider_type)
+		{
+		case FILE_KEY_PROVIDER:
+			if (strcmp(fname, JK_FIELD_NAMES[JF_FILE_PATH]) == 0)
+				*field = JF_FILE_PATH;
+			else
 			{
-				*field = JK_KRING_TYPE;
-				break;
-			}
-			switch (parse->provider_type)
-			{
-				case FILE_KEY_PROVIDER:
-					if (strcmp(fname, JK_FIELD_NAMES[JF_FILE_PATH]) == 0)
-						*field = JF_FILE_PATH;
-					else
-					{
-						*field = JK_FIELD_UNKNOWN;
-						elog(DEBUG1, "parse file keyring config: unexpected field %s", fname);
-					}
-					break;
-
-				case VAULT_V2_KEY_PROVIDER:
-					if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_TOKEN]) == 0)
-						*field = JK_VAULT_TOKEN;
-					else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_URL]) == 0)
-						*field = JK_VAULT_URL;
-					else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_MOUNT_PATH]) == 0)
-						*field = JK_VAULT_MOUNT_PATH;
-					else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_CA_PATH]) == 0)
-						*field = JK_VAULT_CA_PATH;
-					else
-					{
-						*field = JK_FIELD_UNKNOWN;
-						elog(DEBUG1, "parse json keyring config: unexpected field %s", fname);
-					}
-					break;
+				*field = JK_FIELD_UNKNOWN;
+				elog(DEBUG1, "parse file keyring config: unexpected field %s", fname);
 			}
 			break;
 
-		case JK_EXPECT_EXTERN_VAL:
-			if (strcmp(fname, JK_FIELD_NAMES[JK_FIELD_TYPE]) == 0)
-				*field = JK_FIELD_TYPE;
-			else if (strcmp(fname, JK_FIELD_NAMES[JK_REMOTE_URL]) == 0)
-				*field = JK_REMOTE_URL;
-			else if (strcmp(fname, JK_FIELD_NAMES[JK_FIELD_PATH]) == 0)
-				*field = JK_FIELD_PATH;
+		case VAULT_V2_KEY_PROVIDER:
+			if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_TOKEN]) == 0)
+				*field = JK_VAULT_TOKEN;
+			else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_URL]) == 0)
+				*field = JK_VAULT_URL;
+			else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_MOUNT_PATH]) == 0)
+				*field = JK_VAULT_MOUNT_PATH;
+			else if (strcmp(fname, JK_FIELD_NAMES[JK_VAULT_CA_PATH]) == 0)
+				*field = JK_VAULT_CA_PATH;
+			else
+			{
+				*field = JK_FIELD_UNKNOWN;
+				elog(DEBUG1, "parse json keyring config: unexpected field %s", fname);
+			}
 			break;
+
+		case KMIP_KEY_PROVIDER:
+			if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_HOST]) == 0)
+				*field = JK_KMIP_HOST;
+			else if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_PORT]) == 0)
+				*field = JK_KMIP_PORT;
+			else if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_CA_PATH]) == 0)
+				*field = JK_KMIP_CA_PATH;
+			else if (strcmp(fname, JK_FIELD_NAMES[JK_KMIP_CERT_PATH]) == 0)
+				*field = JK_KMIP_CERT_PATH;
+			else
+			{
+				*field = JK_FIELD_UNKNOWN;
+				elog(DEBUG1, "parse json keyring config: unexpected field %s", fname);
+			}
+			break;
+
+		case UNKNOWN_KEY_PROVIDER:
+			Assert(0);
+			break;
+		}
+		break;
+
+	case JK_EXPECT_EXTERN_VAL:
+		if (strcmp(fname, JK_FIELD_NAMES[JK_FIELD_TYPE]) == 0)
+			*field = JK_FIELD_TYPE;
+		else if (strcmp(fname, JK_FIELD_NAMES[JK_REMOTE_URL]) == 0)
+			*field = JK_REMOTE_URL;
+		else if (strcmp(fname, JK_FIELD_NAMES[JK_FIELD_PATH]) == 0)
+			*field = JK_FIELD_PATH;
+		break;
 	}
 
 	return JSON_SUCCESS;
@@ -364,56 +391,70 @@ json_kring_scalar(void *state, char *token, JsonTokenType tokentype)
 }
 
 static void
-json_kring_assign_scalar(JsonKeyringState * parse, JsonKeyringField field, char *value)
+json_kring_assign_scalar(JsonKeyringState *parse, JsonKeyringField field, char *value)
 {
+	KmipKeyring *kmip = parse->provider_opts;
 	VaultV2Keyring *vault = parse->provider_opts;
 	FileKeyring *file = parse->provider_opts;
 
 	switch (field)
 	{
-		case JK_KRING_TYPE:
-			parse->kring_type = value;
-			break;
+	case JK_KRING_TYPE:
+		parse->kring_type = value;
+		break;
 
-		case JK_FIELD_TYPE:
-			parse->field_type = value;
-			break;
-		case JK_REMOTE_URL:
-			parse->extern_url = value;
-			break;
-		case JK_FIELD_PATH:
-			parse->extern_path = value;
-			break;
+	case JK_FIELD_TYPE:
+		parse->field_type = value;
+		break;
+	case JK_REMOTE_URL:
+		parse->extern_url = value;
+		break;
+	case JK_FIELD_PATH:
+		parse->extern_path = value;
+		break;
 
-		case JF_FILE_PATH:
-			strncpy(file->file_name, value, sizeof(file->file_name));
-			break;
+	case JF_FILE_PATH:
+		strncpy(file->file_name, value, sizeof(file->file_name));
+		break;
 
-		case JK_VAULT_TOKEN:
-			strncpy(vault->vault_token, value, sizeof(vault->vault_token));
-			break;
-		case JK_VAULT_URL:
-			strncpy(vault->vault_url, value, sizeof(vault->vault_url));
-			break;
-		case JK_VAULT_MOUNT_PATH:
-			strncpy(vault->vault_mount_path, value, sizeof(vault->vault_mount_path));
-			break;
-		case JK_VAULT_CA_PATH:
-			strncpy(vault->vault_ca_path, value, sizeof(vault->vault_ca_path));
-			break;
+	case JK_VAULT_TOKEN:
+		strncpy(vault->vault_token, value, sizeof(vault->vault_token));
+		break;
+	case JK_VAULT_URL:
+		strncpy(vault->vault_url, value, sizeof(vault->vault_url));
+		break;
+	case JK_VAULT_MOUNT_PATH:
+		strncpy(vault->vault_mount_path, value, sizeof(vault->vault_mount_path));
+		break;
+	case JK_VAULT_CA_PATH:
+		strncpy(vault->vault_ca_path, value, sizeof(vault->vault_ca_path));
+		break;
 
-		default:
-			elog(DEBUG1, "json keyring: unexpected scalar field %d", field);
-			Assert(0);
-			break;
+	case JK_KMIP_HOST:
+		strncpy(kmip->kmip_host, value, sizeof(kmip->kmip_host));
+		break;
+	case JK_KMIP_PORT:
+		strncpy(kmip->kmip_port, value, sizeof(kmip->kmip_port));
+		break;
+	case JK_KMIP_CA_PATH:
+		strncpy(kmip->kmip_ca_path, value, sizeof(kmip->kmip_ca_path));
+		break;
+	case JK_KMIP_CERT_PATH:
+		strncpy(kmip->kmip_cert_path, value, sizeof(kmip->kmip_cert_path));
+		break;
+
+	default:
+		elog(DEBUG1, "json keyring: unexpected scalar field %d", field);
+		Assert(0);
+		break;
 	}
 }
 
 static char *
 get_remote_kring_value(const char *url, const char *field_name)
 {
-	long		httpCode;
-	CurlString	outStr;
+	long httpCode;
+	CurlString outStr;
 
 	/* TODO: we never pfree it */
 	outStr.ptr = palloc0(1);
@@ -437,15 +478,15 @@ get_remote_kring_value(const char *url, const char *field_name)
 
 	/* remove trailing whitespace */
 	outStr.ptr[strcspn(outStr.ptr, " \t\n\r")] = '\0';
-	
+
 	return outStr.ptr;
 }
 
 static char *
 get_file_kring_value(const char *path, const char *field_name)
 {
-	int			fd = -1;
-	char	   *val;
+	int fd = -1;
+	char *val;
 
 	fd = BasicOpenFile(path, O_RDONLY);
 	if (fd < 0)

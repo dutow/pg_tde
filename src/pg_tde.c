@@ -31,6 +31,7 @@
 #include "catalog/tde_principal_key.h"
 #include "keyring/keyring_file.h"
 #include "keyring/keyring_vault.h"
+#include "keyring/keyring_kmip.h"
 #include "utils/builtins.h"
 #include "pg_tde_defs.h"
 #include "smgr/pg_tde_smgr.h"
@@ -45,7 +46,7 @@ PG_MODULE_MAGIC;
 struct OnExtInstall
 {
 	pg_tde_on_ext_install_callback function;
-	void* arg;
+	void *arg;
 };
 
 static struct OnExtInstall on_ext_install_list[MAX_ON_INSTALLS];
@@ -94,8 +95,7 @@ tde_shmem_startup(void)
 #endif
 }
 
-void
-_PG_init(void)
+void _PG_init(void)
 {
 	if (!process_shared_preload_libraries_in_progress)
 	{
@@ -117,6 +117,7 @@ _PG_init(void)
 	SetupTdeDDLHooks();
 	InstallFileKeyring();
 	InstallVaultV2Keyring();
+	InstallKmipKeyring();
 	RegisterCustomRmgr(RM_TDERMGR_ID, &tdeheap_rmgr);
 
 	RegisterStorageMgr();
@@ -136,8 +137,7 @@ Datum pg_tde_extension_initialize(PG_FUNCTION_ARGS)
 
 	PG_RETURN_NULL();
 }
-void
-extension_install_redo(XLogExtensionInstall *xlrec)
+void extension_install_redo(XLogExtensionInstall *xlrec)
 {
 	run_extension_install_callbacks(xlrec, true);
 }
@@ -153,8 +153,8 @@ void on_ext_install(pg_tde_on_ext_install_callback function, void *arg)
 {
 	if (on_ext_install_index >= MAX_ON_INSTALLS)
 		ereport(FATAL,
-			(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				errmsg_internal("out of on extension install slots")));
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg_internal("out of on extension install slots")));
 
 	on_ext_install_list[on_ext_install_index].function = function;
 	on_ext_install_list[on_ext_install_index].arg = arg;
@@ -167,10 +167,10 @@ void on_ext_install(pg_tde_on_ext_install_callback function, void *arg)
  * ------------------
  */
 static void
-run_extension_install_callbacks(XLogExtensionInstall* xlrec , bool redo)
+run_extension_install_callbacks(XLogExtensionInstall *xlrec, bool redo)
 {
 	int i;
-	int tde_table_count =0;
+	int tde_table_count = 0;
 	/*
 	 * Get the number of tde tables in this database
 	 * should always be zero. But still, it prevents
@@ -185,8 +185,7 @@ run_extension_install_callbacks(XLogExtensionInstall* xlrec , bool redo)
 }
 
 /* Returns package version */
-Datum
-pg_tde_version(PG_FUNCTION_ARGS)
+Datum pg_tde_version(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_TEXT_P(cstring_to_text(pg_tde_package_string()));
 }
