@@ -398,6 +398,7 @@ json_kring_assign_scalar(JsonKeyringState * parse, JsonKeyringField field, char 
 {
 	VaultV2Keyring *vault = parse->provider_opts;
 	FileKeyring *file = parse->provider_opts;
+	KmipKeyring *kmip = parse->provider_opts;
 
 	switch (field)
 	{
@@ -431,6 +432,19 @@ json_kring_assign_scalar(JsonKeyringState * parse, JsonKeyringField field, char 
 		case JK_VAULT_CA_PATH:
 			strncpy(vault->vault_ca_path, value, sizeof(vault->vault_ca_path));
 			break;
+
+       case JK_KMIP_HOST:
+               strncpy(kmip->kmip_host, value, sizeof(kmip->kmip_host));                                                         
+               break;                                                                                                            
+       case JK_KMIP_PORT:                                                                                                        
+               strncpy(kmip->kmip_port, value, sizeof(kmip->kmip_port));                                                         
+               break;                                                                                                            
+       case JK_KMIP_CA_PATH:                                                                                                     
+               strncpy(kmip->kmip_ca_path, value, sizeof(kmip->kmip_ca_path));                                                   
+               break;                                                                                                            
+       case JK_KMIP_CERT_PATH:                                                                                                   
+               strncpy(kmip->kmip_cert_path, value, sizeof(kmip->kmip_cert_path));                                               
+               break;           
 
 		default:
 			elog(DEBUG1, "json keyring: unexpected scalar field %d", field);
