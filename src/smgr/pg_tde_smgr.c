@@ -14,7 +14,7 @@
 #include "smgr/pg_tde_smgr.h"
 #if PG_VERSION_NUM >= 180000
 #include "storage/aio.h"
-#include "port/pg_iovec.h"
+#include "storage/bufmgr.h"
 #endif
 
 typedef enum TDEMgrRelationEncryptionStatus
@@ -431,72 +431,44 @@ tde_mdopen(SMgrRelation reln)
 	}
 }
 
-static InternalKey* pread_key = NULL;
-static ForkNumber pread_forknum = 0;
-// We could just calculate these in pread, but could also be good for sanity checks
-static BlockNumber pread_bn = 0;
-static BlockNumber pread_nb = 0;
+static TDESMgrRelation *aio_tdereln = NULL;
 
-static void
-tde_mdstartreadv(PgAioHandle *ioh,
-			 SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-			 void **buffers, BlockNumber nblocks)
+/*
+ * AIO completion callback for mdstartreadv().
+ */
+static PgAioResult
+tde_readv_complete(PgAioHandle *ioh, PgAioResult prior_result, uint8 cb_data)
 {
-	/* Load key early: later we are in a critical section */
-	TDESMgrRelation *tdereln = (TDESMgrRelation *) reln;
+	// let upstream code handle basic checks
+	PgAioResult mdres = md_readv_complete(ioh, prior_result, cb_data);
+	PgAioTargetData *td = pgaio_io_get_target_data(ioh);
 
-	if (tdereln->encryption_status == RELATION_KEY_NOT_AVAILABLE)
-	{
-		InternalKey *int_key = tde_smgr_get_key(&reln->smgr_rlocator);
+	uint64	   *io_data;
+	uint8		handle_data_len;
 
-		tdereln->relKey = *int_key;
-		tdereln->encryption_status = RELATION_KEY_AVAILABLE;
-		pfree(int_key);
+	if(mdres.status != PGAIO_RS_OK) {
+		// do nothing on errors
+		return mdres;
 	}
 
-	/* This only works in sync mode, but we are forcing that in _PG_init:
-	 * as long as we are in sync mode, it is an actual blocking read and it 
-	 * is performed by aio_pread (function pointer) within the starteadv call.
-	 * We replace this pread with our own code, and provide the required key
-	 * to it using a global variable. */
-
-	if (tdereln->encryption_status == RELATION_KEY_AVAILABLE)
-	{
-		pread_bn = blocknum;
-		pread_key = &tdereln->relKey;
-		pread_nb = nblocks;
-		pread_forknum = forknum;
+	if(aio_tdereln == NULL) {
+		// assert?
+		return mdres;
 	}
 
-	mdstartreadv(ioh, reln, forknum, blocknum, buffers, nblocks);
-
-	pread_key = NULL;
-
-}
-
-static ssize_t tde_preadv(int fd, const struct iovec *iov, int iovcnt, off_t offset)
-{
-	ssize_t ret = pg_preadv(fd, iov, iovcnt, offset);
-	int iovec = 0;
-	ssize_t iovec_off = 0;
-
-	if(pread_key == NULL) {
-		return ret;
+	if(aio_tdereln->encryption_status != RELATION_KEY_AVAILABLE) {
+		return mdres;
 	}
 
-	for (int i = 0; i < pread_nb; ++i)
+	io_data = pgaio_io_get_handle_data(ioh, &handle_data_len);
+
+	for (int i = 0; i < td->smgr.nblocks; ++i)
 	{
 		bool		allZero = true;
-		BlockNumber bn = pread_bn + i;
+		BlockNumber bn = td->smgr.blockNum + i;
 		unsigned char iv[16];
-
-		char* buf_ptr = (char*)(iov[iovec].iov_base) + iovec_off;
-
-		iovec_off += BLCKSZ;
-		if(iov[iovec].iov_len <= BLCKSZ)
-		{
-			iovec++;
-		}
+		Buffer		buf = io_data[i]; // TODO: I hope this assumption is correct
+		char	   *buf_ptr = BufferGetBlock(buf);
 
 		/*
 		 * Detect unencrypted all-zero pages written by smgrzeroextend() by
@@ -518,12 +490,34 @@ static ssize_t tde_preadv(int fd, const struct iovec *iov, int iovcnt, off_t off
 		if (allZero)
 			continue;
 
-		CalcBlockIv(pread_forknum, bn, pread_key->base_iv, iv);
+		CalcBlockIv(td->smgr.forkNum, bn, aio_tdereln->relKey.base_iv, iv);
 
-		AesDecrypt(pread_key->key, iv, ((unsigned char *) buf_ptr), BLCKSZ, ((unsigned char *) buf_ptr));
+		AesDecrypt(aio_tdereln->relKey.key, iv, ((unsigned char *) buf_ptr), BLCKSZ, ((unsigned char *) buf_ptr));
 	}
 
-	return ret;
+	return mdres;
+}
+
+static void
+tde_mdstartreadv(PgAioHandle *ioh,
+			 SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+			 void **buffers, BlockNumber nblocks)
+{
+	/* Load key early: later we are in a critical section */
+	aio_tdereln = (TDESMgrRelation *) reln;
+
+	if (aio_tdereln->encryption_status == RELATION_KEY_NOT_AVAILABLE)
+	{
+		InternalKey *int_key = tde_smgr_get_key(&reln->smgr_rlocator);
+
+		aio_tdereln->relKey = *int_key;
+		aio_tdereln->encryption_status = RELATION_KEY_AVAILABLE;
+		pfree(int_key);
+	}
+
+	mdstartreadv(ioh, reln, forknum, blocknum, buffers, nblocks);
+
+	aio_tdereln = NULL;
 }
 
 static const struct f_smgr tde_smgr = {
@@ -557,7 +551,8 @@ RegisterStorageMgr(void)
 		elog(FATAL, "Another storage manager was loaded before pg_tde. Multiple storage managers is unsupported.");
 	OurSMgrId = smgr_register(&tde_smgr, sizeof(TDESMgrRelation));
 	storage_manager_id = OurSMgrId;
-	aio_preadv = tde_preadv;
+
+aio_md_readv_cb.complete_shared = tde_readv_complete;
 }
 
 static void
