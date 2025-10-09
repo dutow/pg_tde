@@ -12,6 +12,10 @@
 #include "encryption/enc_tde.h"
 #include "pg_tde_event_capture.h"
 #include "smgr/pg_tde_smgr.h"
+#if PG_VERSION_NUM >= 180000
+#include "storage/aio.h"
+#include "port/pg_iovec.h"
+#endif
 
 typedef enum TDEMgrRelationEncryptionStatus
 {
@@ -427,6 +431,101 @@ tde_mdopen(SMgrRelation reln)
 	}
 }
 
+static InternalKey* pread_key = NULL;
+static ForkNumber pread_forknum = 0;
+// We could just calculate these in pread, but could also be good for sanity checks
+static BlockNumber pread_bn = 0;
+static BlockNumber pread_nb = 0;
+
+static void
+tde_mdstartreadv(PgAioHandle *ioh,
+			 SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+			 void **buffers, BlockNumber nblocks)
+{
+	/* Load key early: later we are in a critical section */
+	TDESMgrRelation *tdereln = (TDESMgrRelation *) reln;
+
+	if (tdereln->encryption_status == RELATION_KEY_NOT_AVAILABLE)
+	{
+		InternalKey *int_key = tde_smgr_get_key(&reln->smgr_rlocator);
+
+		tdereln->relKey = *int_key;
+		tdereln->encryption_status = RELATION_KEY_AVAILABLE;
+		pfree(int_key);
+	}
+
+	/* This only works in sync mode, but we are forcing that in _PG_init:
+	 * as long as we are in sync mode, it is an actual blocking read and it 
+	 * is performed by aio_pread (function pointer) within the starteadv call.
+	 * We replace this pread with our own code, and provide the required key
+	 * to it using a global variable. */
+
+	if (tdereln->encryption_status == RELATION_KEY_AVAILABLE)
+	{
+		pread_bn = blocknum;
+		pread_key = &tdereln->relKey;
+		pread_nb = nblocks;
+		pread_forknum = forknum;
+	}
+
+	mdstartreadv(ioh, reln, forknum, blocknum, buffers, nblocks);
+
+	pread_key = NULL;
+
+}
+
+static ssize_t tde_preadv(int fd, const struct iovec *iov, int iovcnt, off_t offset)
+{
+	ssize_t ret = pg_preadv(fd, iov, iovcnt, offset);
+	int iovec = 0;
+	ssize_t iovec_off = 0;
+
+	if(pread_key == NULL) {
+		return ret;
+	}
+
+	for (int i = 0; i < pread_nb; ++i)
+	{
+		bool		allZero = true;
+		BlockNumber bn = pread_bn + i;
+		unsigned char iv[16];
+
+		char* buf_ptr = (char*)(iov[iovec].iov_base) + iovec_off;
+
+		iovec_off += BLCKSZ;
+		if(iov[iovec].iov_len <= BLCKSZ)
+		{
+			iovec++;
+		}
+
+		/*
+		 * Detect unencrypted all-zero pages written by smgrzeroextend() by
+		 * looking at the first 32 bytes of the page.
+		 *
+		 * Not encrypting all-zero pages is safe because they are only written
+		 * at the end of the file when extending a table on disk so they tend
+		 * to be short lived plus they only leak a slightly more accurate
+		 * table size than one can glean from just the file size.
+		 */
+		for (int j = 0; j < 32; ++j)
+		{
+			if (*(buf_ptr + j) != 0)
+			{
+				allZero = false;
+				break;
+			}
+		}
+		if (allZero)
+			continue;
+
+		CalcBlockIv(pread_forknum, bn, pread_key->base_iv, iv);
+
+		AesDecrypt(pread_key->key, iv, ((unsigned char *) buf_ptr), BLCKSZ, ((unsigned char *) buf_ptr));
+	}
+
+	return ret;
+}
+
 static const struct f_smgr tde_smgr = {
 	.name = "tde",
 	.smgr_init = mdinit,
@@ -441,7 +540,7 @@ static const struct f_smgr tde_smgr = {
 	.smgr_prefetch = mdprefetch,
 	.smgr_maxcombine = mdmaxcombine,
 	.smgr_readv = tde_mdreadv,
-	.smgr_startreadv = mdstartreadv,
+	.smgr_startreadv = tde_mdstartreadv,
 	.smgr_writev = tde_mdwritev,
 	.smgr_writeback = mdwriteback,
 	.smgr_nblocks = mdnblocks,
@@ -458,6 +557,7 @@ RegisterStorageMgr(void)
 		elog(FATAL, "Another storage manager was loaded before pg_tde. Multiple storage managers is unsupported.");
 	OurSMgrId = smgr_register(&tde_smgr, sizeof(TDESMgrRelation));
 	storage_manager_id = OurSMgrId;
+	aio_preadv = tde_preadv;
 }
 
 static void
@@ -541,3 +641,4 @@ CalcBlockIv(ForkNumber forknum, BlockNumber bn, const unsigned char *base_iv, un
 	for (int i = 0; i < 16; i++)
 		iv[i] ^= base_iv[i];
 }
+
