@@ -147,7 +147,13 @@ static const char *const excludeDirContents[] =
 	/* Contents zeroed on startup, see StartupSUBTRANS(). */
 	"pg_subtrans",
 
-	/* pg_tde keys and providers */
+	/*
+	 * pg_tde encryption key maps, WAL keys, and provider configurations.
+	 * These are handled by the dedicated TDE sync step in pg_rewind.c
+	 * (pg_tde_rewind_sync), which re-encrypts key maps and merges WAL
+	 * keys from source and target. The directory itself must be created
+	 * but its contents are not copied through the normal filemap path.
+	 */
 	"pg_tde",
 
 	/* end of list */
@@ -722,7 +728,15 @@ decide_file_action(file_entry_t *entry)
 	if (strstr(path, ".DS_Store") != NULL)
 		return FILE_ACTION_NONE;
 
-	/* Skip pg_tde key data */
+	/*
+	 * Skip all pg_tde/ files. These cannot be simply copied from source
+	 * because the source and target may have different principal keys,
+	 * different InternalKeys for the same relations, and different WAL
+	 * encryption keys. A dedicated sync step (pg_tde_rewind_sync) runs
+	 * before perform_rewind() to: adopt the source's provider/principal
+	 * key config, re-encrypt the target's key maps, and merge WAL key
+	 * entries from both timelines.
+	 */
 	if (strstr(path, "pg_tde/") != NULL)
 		return FILE_ACTION_NONE;
 

@@ -10,6 +10,7 @@
 #include "postgres_fe.h"
 
 #include "catalog/pg_type_d.h"
+#include "catalog/pg_tablespace_d.h"
 #include "common/connect.h"
 #include "file_ops.h"
 #include "filemap.h"
@@ -17,6 +18,12 @@
 #include "pg_rewind.h"
 #include "port/pg_bswap.h"
 #include "rewind_source.h"
+
+#include "pg_tde.h"
+#include "common/pg_tde_utils.h"
+#include "access/pg_tde_tdemap.h"
+#include "encryption/enc_tde.h"
+#include "pg_tde_rewind_sync.h"
 
 /*
  * Files are fetched MAX_CHUNK_SIZE bytes at a time, and with a
@@ -591,6 +598,73 @@ process_queued_fetch_requests(libpq_source *src)
 				pg_fatal("received more than requested for file \"%s\"", rq->path);
 
 			open_target_file(filename, false);
+
+			/*
+			 * Re-encrypt relation data blocks from the source's key
+			 * to the target's key.  The source and target may have
+			 * different InternalKeys for the same relation (because
+			 * tde_smgr_create_key_redo generates a random key on WAL
+			 * replay).  We decrypt with the source key and re-encrypt
+			 * with the target key so the data matches the target's
+			 * key map.
+			 *
+			 * Chunks may contain multiple consecutive blocks (the
+			 * queueing logic merges adjacent requests).  We process
+			 * each BLCKSZ-aligned block within the chunk.
+			 *
+			 * We must copy the chunk to a local buffer because
+			 * PQgetvalue returns a pointer into the PGresult which
+			 * should not be modified in place.
+			 */
+			if (chunksize > 0 && chunksize % BLCKSZ == 0 &&
+				chunkoff % BLCKSZ == 0)
+			{
+				RelFileLocator rlocator;
+				unsigned int segNo;
+
+				if (path_rlocator(filename, &rlocator, &segNo))
+				{
+					InternalKey *source_key;
+					InternalKey *target_key;
+					const char *source_tde_dir = pg_tde_get_source_tde_dir();
+					char		target_tde_path[MAXPGPATH];
+					char	   *reencrypt_buf;
+
+					pg_tde_set_data_dir(source_tde_dir);
+					source_key = pg_tde_get_smgr_key(rlocator);
+
+					snprintf(target_tde_path, sizeof(target_tde_path),
+							 "%s/%s", datadir_target, PG_TDE_DATA_DIR);
+					pg_tde_set_data_dir(target_tde_path);
+					target_key = pg_tde_get_smgr_key(rlocator);
+
+					if (source_key != NULL || target_key != NULL)
+					{
+						int			nblocks = chunksize / BLCKSZ;
+
+						reencrypt_buf = pg_malloc(chunksize);
+						memcpy(reencrypt_buf, chunk, chunksize);
+
+						for (int b = 0; b < nblocks; b++)
+						{
+							BlockNumber blkno = (chunkoff / BLCKSZ) + b +
+								segNo * RELSEG_SIZE;
+							unsigned char *page = (unsigned char *) reencrypt_buf + b * BLCKSZ;
+
+							if (source_key != NULL)
+								tde_decrypt_smgr_block(source_key, MAIN_FORKNUM,
+													   blkno, page, page);
+							if (target_key != NULL)
+								tde_encrypt_smgr_block(target_key, MAIN_FORKNUM,
+													   blkno, page, page);
+						}
+
+						pg_log_debug("TDE re-encrypt: %s offset %lld, %d blocks",
+									 filename, (long long) chunkoff, nblocks);
+						chunk = reencrypt_buf;
+					}
+				}
+			}
 
 			write_target_range(chunk, chunkoff, chunksize);
 		}

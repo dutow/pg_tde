@@ -36,6 +36,7 @@
 #include "access/pg_tde_fe_init.h"
 #include "access/pg_tde_xlog_smgr.h"
 #include "catalog/tde_global_space.h"
+#include "pg_tde_rewind_sync.h"
 
 static void usage(const char *progname);
 
@@ -526,6 +527,16 @@ main(int argc, char **argv)
 		fetch_size = filemap->fetch_size;
 		fetch_done = 0;
 	}
+
+	/*
+	 * Sync pg_tde key data between source and target.  This must happen
+	 * after WAL analysis (which reads the target's WAL using the target's
+	 * current wal_keys) but before perform_rewind (which copies data
+	 * blocks and needs both key maps to be interoperable for the
+	 * decrypt/re-encrypt step in local_source.c and libpq_source.c).
+	 */
+	if (!dry_run)
+		pg_tde_rewind_sync(source, conn, datadir_source, datadir_target);
 
 	/*
 	 * We have now collected all the information we need from both systems,
