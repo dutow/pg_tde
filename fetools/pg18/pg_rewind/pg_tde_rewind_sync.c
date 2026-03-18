@@ -223,23 +223,25 @@ read_wal_key_file_header(const char *dirpath,
 }
 
 /*
- * Verify that the principal key name matches between source and target
- * for a given key file.  We compare the key name from the signed header;
- * if the names match and both nodes use the same keyring (which is
- * expected since key management operations are WAL-replicated), the
- * keys are interoperable.
+ * Check whether the principal key name matches between source and target.
+ * Log a warning if they differ — this means one side rotated the key
+ * after divergence.  The rewind can still succeed as long as the keyring
+ * retains both old and new keys (which file-based keyrings and most
+ * Vault/KMIP setups do).  If the old key was deleted from the keyring,
+ * the re-encryption step will fail with a more specific error.
  */
 static void
-verify_principal_key_match(const char *context,
-						   const TDESignedPrincipalKeyInfo *source_info,
-						   const TDESignedPrincipalKeyInfo *target_info)
+check_principal_key_match(const char *context,
+						  const TDESignedPrincipalKeyInfo *source_info,
+						  const TDESignedPrincipalKeyInfo *target_info)
 {
 	if (strcmp(source_info->data.name, target_info->data.name) != 0)
-		pg_fatal("principal key mismatch for %s: "
-				 "source has \"%s\", target has \"%s\". "
-				 "pg_tde_rewind does not yet support rewinding clusters "
-				 "with diverged principal keys.",
-				 context, source_info->data.name, target_info->data.name);
+		pg_log_warning("principal key divergence detected for %s: "
+					   "source has \"%s\", target has \"%s\". "
+					   "Rewind will attempt to proceed, but requires "
+					   "both keys to be accessible in the keyring.",
+					   context, source_info->data.name,
+					   target_info->data.name);
 }
 
 /*
@@ -505,7 +507,7 @@ pg_tde_rewind_sync(rewind_source *source,
 	}
 
 	if (target_has_wal_keys && source_has_wal_keys)
-		verify_principal_key_match("WAL keys (server principal key)",
+		check_principal_key_match("WAL keys (server principal key)",
 								  &source_wal_info, &target_wal_info);
 
 	/*
