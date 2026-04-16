@@ -29,6 +29,13 @@ add_project_arguments(cc.get_supported_arguments([
   '-fexcess-precision=standard',
 ]), language: ['c'])
 
+# Use MSVC's standard-conforming preprocessor. Without it, variadic macro
+# expansion with an empty __VA_ARGS__ leaves a stray trailing comma, which
+# breaks every elog(ERROR, "msg") call in the frontend include pg_tde_fe.h.
+if cc.get_id() == 'msvc'
+  add_project_arguments('/Zc:preprocessor', language: 'c')
+endif
+
 # TODO: Why does it seems like they sometimes are in pkglibdir and other times in libdir?
 pgport = cc.find_library('pgport', dirs: [pkglibdir, libdir], static: true)
 pgcommon = cc.find_library('pgcommon', dirs: [pkglibdir, libdir], static: true)
@@ -46,19 +53,47 @@ major_version = version.split(' ')[1].split('.')[0].to_int()
 
 fetools = 'fetools/pg@0@'.format(major_version)
 
-incdirs = include_directories(
+incdir_list = [
   'src/include',
   'src/libkmip/libkmip/include',
   fetools / 'include',
   includedir_server,
   includedir,
   pkgincludedir / 'internal',
-)
+]
+
+# On Windows, PostgreSQL ships POSIX/Winsock shims under server/port/{win32,win32_msvc}
+# (e.g. netinet/in.h, dirent.h, unistd.h). PG's own build adds these to the include
+# path automatically; out-of-tree extensions must do the same.
+if host_machine.system() == 'windows'
+  incdir_list += [
+    includedir_server / 'port/win32',
+    includedir_server / 'port/win32_msvc',
+  ]
+endif
+
+incdirs = include_directories(incdir_list)
 
 backend_link_args = []
+backend_deps = [crypto, ssl, curl]
 
 if host_machine.system() == 'darwin'
   backend_link_args += ['-bundle_loader', bindir / 'postgres']
+endif
+
+# On Windows, loadable modules must resolve backend symbols at link time via
+# postgres.lib (the import library for postgres.exe).
+if host_machine.system() == 'windows'
+  backend_deps += cc.find_library('postgres', dirs: [libdir])
+endif
+
+# libkmip is not portable to MSVC (statement expressions, Windows SDK name
+# collisions, CP-1252 source). Skip the KMIP keyring provider on Windows.
+build_kmip = host_machine.system() != 'windows'
+
+kmip_c_args = []
+if build_kmip
+  kmip_c_args += '-DHAVE_LIBKMIP'
 endif
 
 install_data(
@@ -69,70 +104,88 @@ install_data(
   install_dir: sharedir / 'extension',
 )
 
-kmip = static_library('kmip',
-  files(
-    'src/libkmip/libkmip/src/kmip.c',
-    'src/libkmip/libkmip/src/kmip_bio.c',
-    'src/libkmip/libkmip/src/kmip_locate.c',
-    'src/libkmip/libkmip/src/kmip_memset.c',
-  ),
-  c_args: ['-w'], # This is a 3rd party, disable warnings completely
-  include_directories: incdirs,
-)
+backend_sources = [
+  'src/access/pg_tde_tdemap.c',
+  'src/access/pg_tde_xlog.c',
+  'src/access/pg_tde_xlog_keys.c',
+  'src/access/pg_tde_xlog_smgr.c',
+  'src/catalog/tde_keyring.c',
+  'src/catalog/tde_keyring_parse_opts.c',
+  'src/catalog/tde_principal_key.c',
+  'src/common/pg_tde_utils.c',
+  'src/encryption/enc_aes.c',
+  'src/encryption/enc_tde.c',
+  'src/keyring/keyring_api.c',
+  'src/keyring/keyring_curl.c',
+  'src/keyring/keyring_file.c',
+  'src/keyring/keyring_vault.c',
+  'src/pg_tde.c',
+  'src/pg_tde_event_capture.c',
+  'src/pg_tde_guc.c',
+  'src/smgr/pg_tde_smgr.c',
+]
 
-shared_module('pg_tde',
-  files(
-    'src/access/pg_tde_tdemap.c',
-    'src/access/pg_tde_xlog.c',
-    'src/access/pg_tde_xlog_keys.c',
-    'src/access/pg_tde_xlog_smgr.c',
-    'src/catalog/tde_keyring.c',
-    'src/catalog/tde_keyring_parse_opts.c',
-    'src/catalog/tde_principal_key.c',
-    'src/common/pg_tde_utils.c',
-    'src/encryption/enc_aes.c',
-    'src/encryption/enc_tde.c',
-    'src/keyring/keyring_api.c',
-    'src/keyring/keyring_curl.c',
-    'src/keyring/keyring_file.c',
+frontend_sources = [
+  'src/access/pg_tde_tdemap.c',
+  'src/access/pg_tde_xlog_keys.c',
+  'src/catalog/tde_keyring.c',
+  'src/catalog/tde_keyring_parse_opts.c',
+  'src/catalog/tde_principal_key.c',
+  'src/common/pg_tde_utils.c',
+  'src/encryption/enc_aes.c',
+  'src/encryption/enc_tde.c',
+  'src/keyring/keyring_api.c',
+  'src/keyring/keyring_curl.c',
+  'src/keyring/keyring_file.c',
+  'src/keyring/keyring_vault.c',
+]
+
+kmip_link = []
+
+if build_kmip
+  backend_sources += [
     'src/keyring/keyring_kmip.c',
     'src/keyring/keyring_kmip_impl.c',
-    'src/keyring/keyring_vault.c',
-    'src/pg_tde.c',
-    'src/pg_tde_event_capture.c',
-    'src/pg_tde_guc.c',
-    'src/smgr/pg_tde_smgr.c',
-  ),
+  ]
+  frontend_sources += [
+    'src/keyring/keyring_kmip.c',
+    'src/keyring/keyring_kmip_impl.c',
+  ]
+
+  kmip = static_library('kmip',
+    files(
+      'src/libkmip/libkmip/src/kmip.c',
+      'src/libkmip/libkmip/src/kmip_bio.c',
+      'src/libkmip/libkmip/src/kmip_locate.c',
+      'src/libkmip/libkmip/src/kmip_memset.c',
+    ),
+    c_args: ['-w'], # This is a 3rd party, disable warnings completely
+    include_directories: incdirs,
+  )
+  kmip_link += kmip
+else
+  backend_sources += 'src/keyring/keyring_kmip_stub.c'
+  frontend_sources += 'src/keyring/keyring_kmip_stub.c'
+endif
+
+shared_module('pg_tde',
+  files(backend_sources),
+  c_args: kmip_c_args,
   include_directories: incdirs,
   install: true,
   install_dir: pkglibdir,
-  dependencies: [crypto, ssl, curl],
+  dependencies: backend_deps,
   name_prefix: '',
-  link_with: [kmip],
+  link_with: kmip_link,
   link_args: backend_link_args,
 )
 
 pg_tde_frontend = static_library('pg_tde_frontend',
-  files(
-    'src/access/pg_tde_tdemap.c',
-    'src/access/pg_tde_xlog_keys.c',
-    'src/catalog/tde_keyring.c',
-    'src/catalog/tde_keyring_parse_opts.c',
-    'src/catalog/tde_principal_key.c',
-    'src/common/pg_tde_utils.c',
-    'src/encryption/enc_aes.c',
-    'src/encryption/enc_tde.c',
-    'src/keyring/keyring_api.c',
-    'src/keyring/keyring_curl.c',
-    'src/keyring/keyring_file.c',
-    'src/keyring/keyring_kmip.c',
-    'src/keyring/keyring_kmip_impl.c',
-    'src/keyring/keyring_vault.c',
-  ),
-  c_args: ['-DFRONTEND'],
+  files(frontend_sources),
+  c_args: ['-DFRONTEND'] + kmip_c_args,
   dependencies: [pgfeutils, pgcommon, pgport, curl, crypto, ssl],
   include_directories: incdirs,
-  link_with: [kmip],
+  link_with: kmip_link,
 )
 
 pg_tde_frontend_xlog = static_library('pg_tde_frontend_xlog',
@@ -143,7 +196,7 @@ pg_tde_frontend_xlog = static_library('pg_tde_frontend_xlog',
   dependencies: [lz4, zstd],
   c_args: ['-DFRONTEND'],
   include_directories: incdirs,
-  link_with: [kmip],
+  link_with: kmip_link,
 )
 
 executable('pg_tde_change_key_provider',
@@ -201,12 +254,19 @@ else
   )
 endif
 
+basebackup_deps = [pq, z]
+
+# pg_basebackup uses select() which requires Winsock on Windows.
+if host_machine.system() == 'windows'
+  basebackup_deps += cc.find_library('ws2_32')
+endif
+
 executable('pg_tde_basebackup',
   bb_sources,
   include_directories: incdirs,
   install: true,
   install_dir: bindir,
-  dependencies: [pq, z],
+  dependencies: basebackup_deps,
   link_with: [pg_tde_frontend, pg_tde_frontend_xlog],
 )
 

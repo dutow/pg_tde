@@ -31,6 +31,8 @@
 #include "catalog/namespace.h"
 #include "executor/spi.h"
 #include "funcapi.h"
+#include "storage/lwlock.h"
+#include "storage/shmem.h"
 #else
 #include "fe_utils/simple_list.h"
 #include "pg_tde_fe.h"
@@ -89,19 +91,48 @@ static void check_provider_record(KeyringProviderRecord *provider_record);
 
 #define PG_TDE_LIST_PROVIDERS_COLS 4
 
-static LWLockPadded *tdeLocks = NULL;	/* Lives in shared state */
+/*
+ * Cache the LWLockPadded pointer returned by GetNamedLWLockTranche() in
+ * shared memory.
+ *
+ * GetNamedLWLockTranche() reads NamedLWLockTrancheRequestArray, which is a
+ * per-process static populated only by RequestNamedLWLockTranche() inside the
+ * shmem_request_hook. On fork-based platforms child processes inherit that
+ * static, so calling GetNamedLWLockTranche() in each shmem_startup_hook works.
+ * Under Windows EXEC_BACKEND the static is empty in children and calling it
+ * dereferences NULL. Store the pointer in shared memory once (when the
+ * postmaster first creates the shmem) so every process can find it.
+ */
+typedef struct KeyProviderSharedState
+{
+	LWLockPadded *locks;
+} KeyProviderSharedState;
+
+static KeyProviderSharedState *keyProviderShared = NULL;
 
 static inline LWLock *
 tde_provider_info_lock(void)
 {
-	Assert(tdeLocks);
-	return &tdeLocks[TDE_LWLOCK_PI_FILES].lock;
+	Assert(keyProviderShared);
+	return &keyProviderShared->locks[TDE_LWLOCK_PI_FILES].lock;
+}
+
+Size
+KeyProviderShmemSize(void)
+{
+	return MAXALIGN(sizeof(KeyProviderSharedState));
 }
 
 void
 KeyProviderShmemInit(void)
 {
-	tdeLocks = GetNamedLWLockTranche(TDE_TRANCHE_NAME);
+	bool		found;
+
+	keyProviderShared = ShmemInitStruct("pg_tde_key_provider",
+										sizeof(KeyProviderSharedState),
+										&found);
+	if (!found)
+		keyProviderShared->locks = GetNamedLWLockTranche(TDE_TRANCHE_NAME);
 }
 
 void
@@ -778,7 +809,7 @@ scan_key_provider_file(ProviderScanType scanType, void *scanKey, Oid dbOid)
 
 		if (scanType == PROVIDER_SCAN_BY_NAME)
 		{
-			if (strcasecmp(provider.provider_name, (char *) scanKey) == 0)
+			if (pg_strcasecmp(provider.provider_name, (char *) scanKey) == 0)
 				match = true;
 		}
 		else if (scanType == PROVIDER_SCAN_BY_ID)

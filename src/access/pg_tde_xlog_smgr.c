@@ -603,11 +603,13 @@ TDEXLogCryptBuffer(const void *buf, void *out_buf, size_t count, off_t offset,
 	}
 }
 
+#ifdef __SIZEOF_INT128__
 union u128cast
 {
 	char		a[16];
 	unsigned	__int128 i;
 };
+#endif
 
 /*
  * Calculate the start IV for an XLog segmenet.
@@ -622,6 +624,7 @@ union u128cast
 static void
 CalcXLogPageIVPrefix(TimeLineID tli, XLogRecPtr lsn, const unsigned char *base_iv, char *iv_prefix)
 {
+#ifdef __SIZEOF_INT128__
 	union u128cast base;
 	union u128cast iv;
 	unsigned	__int128 offset;
@@ -645,5 +648,57 @@ CalcXLogPageIVPrefix(TimeLineID tli, XLogRecPtr lsn, const unsigned char *base_i
 		iv_prefix[i] = iv.a[i];
 #else
 		iv_prefix[i] = iv.a[15 - i];
+#endif
+#else
+	/*
+	 * Portable fallback for compilers without __int128 (MSVC). Uses two
+	 * uint64_t halves with an explicit carry to emulate 128-bit add. The
+	 * byte-level semantics must match the __int128 path exactly so that
+	 * encrypted data is interchangeable between platforms.
+	 */
+	unsigned char base[16];
+	unsigned char iv[16];
+	uint64_t	base_lo,
+				base_hi;
+	uint64_t	offset_lo,
+				offset_hi;
+	uint64_t	iv_lo,
+				iv_hi;
+	uint64_t	carry;
+
+	for (int i = 0; i < 16; i++)
+#ifdef WORDS_BIGENDIAN
+		base[i] = base_iv[i];
+#else
+		base[i] = base_iv[15 - i];
+#endif
+
+	memcpy(&base_lo, &base[0], 8);
+	memcpy(&base_hi, &base[8], 8);
+
+	/* base &= ~(1 << 32): clear bit 32, which is bit 0 of byte 4 in LE order */
+	base_lo &= ~((uint64_t) 1 << 32);
+
+	/*
+	 * offset = (tli << 112) | (lsn << 32).  Within a 128-bit value,
+	 * (tli << 112) keeps only tli's low 16 bits at bits 112-127; (lsn << 32)
+	 * places lsn at bits 32-95, straddling the two halves.
+	 */
+	offset_lo = (uint64_t) lsn << 32;
+	offset_hi = ((uint64_t) lsn >> 32) | ((uint64_t) (tli & 0xFFFF) << 48);
+
+	iv_lo = base_lo + offset_lo;
+	carry = (iv_lo < base_lo) ? 1 : 0;
+	iv_hi = base_hi + offset_hi + carry;
+
+	memcpy(&iv[0], &iv_lo, 8);
+	memcpy(&iv[8], &iv_hi, 8);
+
+	for (int i = 0; i < 16; i++)
+#ifdef WORDS_BIGENDIAN
+		iv_prefix[i] = iv[i];
+#else
+		iv_prefix[i] = iv[15 - i];
+#endif
 #endif
 }

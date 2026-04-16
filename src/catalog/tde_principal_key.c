@@ -4,7 +4,17 @@
 
 #include "postgres.h"
 
+#ifdef WIN32
+#include <windows.h>
+/*
+ * Windows has no mlock(); VirtualLock pins pages in the process working
+ * set, which matches the intent (keep the principal key out of the swap
+ * file). VirtualLock returns nonzero on success, so translate to 0/-1.
+ */
+#define mlock(addr, len) (VirtualLock((addr), (len)) ? 0 : -1)
+#else
 #include <sys/mman.h>
+#endif
 #include <sys/time.h>
 
 #include "access/xlog.h"
@@ -123,23 +133,23 @@ PrincipalKeyShmemInit(void)
 	bool		found;
 	char	   *free_start;
 	Size		required_shmem_size = PrincipalKeyShmemSize();
+	TdePrincipalKeySharedState *sharedState;
 
 	Assert(LWLockHeldByMeInMode(AddinShmemInitLock, LW_EXCLUSIVE));
 
 	/* Create or attach to the shared memory state */
 	ereport(NOTICE, errmsg("PrincipalKeyShmemInit: requested %ld bytes", required_shmem_size));
 	free_start = ShmemInitStruct("pg_tde", required_shmem_size, &found);
+	sharedState = (TdePrincipalKeySharedState *) free_start;
 
 	if (!found)
 	{
-		TdePrincipalKeySharedState *sharedState;
 		Size		sz;
 		Size		dsa_area_size;
 		dsa_area   *dsa;
 		dshash_table *dsh;
 
 		/* Now place shared state structure */
-		sharedState = (TdePrincipalKeySharedState *) free_start;
 		sz = MAXALIGN(sizeof(TdePrincipalKeySharedState));
 		free_start += sz;
 		Assert(sz <= required_shmem_size);
@@ -167,11 +177,17 @@ PrincipalKeyShmemInit(void)
 		sharedState->hashHandle = dshash_get_hash_table_handle(dsh);
 		sharedState->rawDsaArea = free_start;
 
-		principalKeyLocalState.sharedPrincipalKeyState = sharedState;
-		principalKeyLocalState.sharedHash = NULL;
-
 		dshash_detach(dsh);
 	}
+
+	/*
+	 * Set the local pointer in both branches. On fork-based platforms the
+	 * postmaster sets it before forking and children inherit it, but under
+	 * Windows EXEC_BACKEND each child starts with a NULL static, so every
+	 * process must install the pointer here.
+	 */
+	principalKeyLocalState.sharedPrincipalKeyState = sharedState;
+	principalKeyLocalState.sharedHash = NULL;
 }
 
 /*
