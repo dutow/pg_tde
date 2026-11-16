@@ -72,18 +72,35 @@ $new->init;
 $new->append_conf('postgresql.conf', "shared_preload_libraries = 'pg_tde'");
 $new->append_conf('postgresql.conf', "pg_tde.wal_encrypt = on");
 
+# Failed key copy has to abort the upgrade and keep the existing destination
+my @upgrade_cmd = (
+	'pg_tde_upgrade', '--no-sync',
+	'--old-datadir' => $old->data_dir,
+	'--new-datadir' => $new->data_dir,
+	'--old-bindir' => $old->config_data('--bindir'),
+	'--new-bindir' => $new->config_data('--bindir'),
+	'--socketdir' => $new->host,
+	'--old-port' => $old->port,
+	'--new-port' => $new->port,);
+my $unreadable = $old->data_dir . '/pg_tde/unreadable';
+my $marker = $new->data_dir . '/pg_tde/marker';
+
+mkdir $new->data_dir . '/pg_tde';
+append_to_file($marker, 'x');
+append_to_file($unreadable, 'x');
+chmod 0000, $unreadable;
+
+command_fails([@upgrade_cmd], 'fails when pg_tde can not be copied');
+ok(-f $marker, 'existing pg_tde directory kept after failed copy');
+ok(!-e $new->data_dir . '/pg_upgrade_output.d', 'pg_upgrade not started after failed copy');
+
+unlink $unreadable;
+
 command_ok(
-	[
-		'pg_tde_upgrade', '--no-sync',
-		'--old-datadir' => $old->data_dir,
-		'--new-datadir' => $new->data_dir,
-		'--old-bindir' => $old->config_data('--bindir'),
-		'--new-bindir' => $new->config_data('--bindir'),
-		'--socketdir' => $new->host,
-		'--old-port' => $old->port,
-		'--new-port' => $new->port,
-	],
+	[@upgrade_cmd],
 	'executes pg_upgrade successfully with pg_tde');
+
+ok(!-e $marker, 'old pg_tde directory replaced');
 
 $new->start;
 is($new->safe_psql('postgres', "SELECT * FROM test_enc"),

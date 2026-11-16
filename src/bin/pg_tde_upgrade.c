@@ -1,13 +1,16 @@
 #include "postgres_fe.h"
 
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #ifndef WIN32
 #include <sys/wait.h>
 #else
 #include <process.h>
 #endif
 
+#include "common/file_perm.h"
 #include "common/file_utils.h"
 #include "common/logging.h"
 #include "getopt_long.h"
@@ -120,42 +123,123 @@ setup_bin(const char *src, const char *dest)
 }
 
 static void
+copy_file(const char *src, const char *dst)
+{
+	int			src_fd;
+	int			dst_fd;
+	char		buf[8192];
+	ssize_t		nread;
+
+	if ((src_fd = open(src, O_RDONLY | PG_BINARY, 0)) < 0)
+		pg_fatal("could not open file \"%s\": %m", src);
+
+	if ((dst_fd = open(dst, O_WRONLY | O_CREAT | O_EXCL | PG_BINARY, pg_file_create_mode)) < 0)
+		pg_fatal("could not create file \"%s\": %m", dst);
+
+	while ((nread = read(src_fd, buf, sizeof(buf))) > 0)
+	{
+		errno = 0;
+		if (write(dst_fd, buf, nread) != nread)
+		{
+			if (errno == 0)
+				errno = ENOSPC;
+			pg_fatal("could not write file \"%s\": %m", dst);
+		}
+	}
+
+	if (nread < 0)
+		pg_fatal("could not read file \"%s\": %m", src);
+
+	if (close(dst_fd) != 0)
+		pg_fatal("could not close file \"%s\": %m", dst);
+
+	close(src_fd);
+}
+
+static void
+copy_dir(const char *src, const char *dst)
+{
+	DIR		   *dir;
+	struct dirent *de;
+
+	if (mkdir(dst, pg_dir_create_mode) < 0)
+		pg_fatal("could not create directory \"%s\": %m", dst);
+
+	dir = opendir(src);
+	if (dir == NULL)
+		pg_fatal("could not open directory \"%s\": %m", src);
+
+	while (errno = 0, (de = readdir(dir)))
+	{
+		char		srcfile[MAXPGPATH];
+		char		dstfile[MAXPGPATH];
+		struct stat st;
+
+		if (strcmp(de->d_name, ".") == 0 ||
+			strcmp(de->d_name, "..") == 0)
+			continue;
+
+		snprintf(srcfile, sizeof(srcfile), "%s/%s", src, de->d_name);
+		snprintf(dstfile, sizeof(dstfile), "%s/%s", dst, de->d_name);
+
+		if (stat(srcfile, &st) < 0)
+			pg_fatal("could not stat file \"%s\": %m", srcfile);
+
+		if (S_ISDIR(st.st_mode))
+			copy_dir(srcfile, dstfile);
+		else if (S_ISREG(st.st_mode))
+			copy_file(srcfile, dstfile);
+		else
+			pg_fatal("unexpected file type for \"%s\"", srcfile);
+	}
+
+	if (errno)
+		pg_fatal("could not read directory \"%s\": %m", src);
+
+	closedir(dir);
+}
+
+static void
 copy_pg_tde(const char *old_pgdata, const char *new_pgdata)
 {
 	char		old_pg_tde[MAXPGPATH];
 	char		new_pg_tde[MAXPGPATH];
+	char		tmp_pg_tde[MAXPGPATH];
 	struct stat statBuf;
-	char	   *cmd;
 
 	snprintf(old_pg_tde, sizeof(old_pg_tde), "%s/pg_tde", old_pgdata);
 	snprintf(new_pg_tde, sizeof(new_pg_tde), "%s/pg_tde", new_pgdata);
+	snprintf(tmp_pg_tde, sizeof(tmp_pg_tde), "%s/pg_tde.tmp", new_pgdata);
 
 	if (stat(old_pg_tde, &statBuf) < 0)
 	{
 		if (errno == ENOENT)
 			return;
 		else
-			pg_fatal("could not stat directory \"%s\"", old_pg_tde);
+			pg_fatal("could not stat directory \"%s\": %m", old_pg_tde);
 	}
 
-	if (stat(new_pg_tde, &statBuf) < 0)
+	if (stat(tmp_pg_tde, &statBuf) == 0)
 	{
-		if (errno != ENOENT)
-			pg_fatal("could not stat directory \"%s\"", new_pg_tde);
+		if (!rmtree(tmp_pg_tde, true))
+			pg_fatal("could not delete directory \"%s\"", tmp_pg_tde);
 	}
-	else
+	else if (errno != ENOENT)
+		pg_fatal("could not stat directory \"%s\": %m", tmp_pg_tde);
+
+	/* Keep the old destination until we have a complete copy */
+	copy_dir(old_pg_tde, tmp_pg_tde);
+
+	if (stat(new_pg_tde, &statBuf) == 0)
 	{
 		if (!rmtree(new_pg_tde, true))
 			pg_fatal("could not delete directory \"%s\"", new_pg_tde);
 	}
+	else if (errno != ENOENT)
+		pg_fatal("could not stat directory \"%s\": %m", new_pg_tde);
 
-	/* pg_upgrade itself uses cp to copy sub directories */
-	cmd = psprintf("cp -Rf \"%s\" \"%s\"", old_pg_tde, new_pg_tde);
-
-	if (system(cmd) < 0)
-		pg_fatal("could not copy pg_tde subdirectory from \"%s\" to \"%s\": %m", old_pg_tde, new_pg_tde);
-
-	pg_free(cmd);
+	if (rename(tmp_pg_tde, new_pg_tde) < 0)
+		pg_fatal("could not rename directory \"%s\" to \"%s\": %m", tmp_pg_tde, new_pg_tde);
 }
 
 static void
